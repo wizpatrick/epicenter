@@ -1,5 +1,9 @@
 use log::{info, warn};
 use tauri::Manager;
+use tauri::{
+    menu::{MenuBuilder, MenuItemBuilder},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+};
 use tauri_plugin_aptabase::EventTracker;
 use tauri_plugin_log::{Target, TargetKind};
 
@@ -174,22 +178,82 @@ pub async fn run() {
     ]);
 
     let app = builder
+        .setup(|app| {
+            // Hide from Dock, live only in menu bar on macOS
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Build tray menu
+            let show_hide =
+                MenuItemBuilder::with_id("show_hide", "Show/Hide Window").build(app)?;
+            let quit = MenuItemBuilder::with_id("quit", "Quit Whispering").build(app)?;
+            let menu = MenuBuilder::new(app).items(&[&show_hide, &quit]).build()?;
+
+            // Create the menu bar icon
+            TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .icon_as_template(true)
+                .tooltip("Whispering")
+                .menu(&menu)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show_hide" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            if window.is_visible().unwrap_or(false) {
+                                let _ = window.hide();
+                            } else {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            if window.is_visible().unwrap_or(false) {
+                                let _ = window.hide();
+                            } else {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    }
+                })
+                .build(app)?;
+
+            Ok(())
+        })
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
     app.run(|handler, event| {
-        // Only track events if Aptabase is enabled (key is not empty)
-        if !aptabase_key.is_empty() {
-            match event {
-                tauri::RunEvent::Exit { .. } => {
-                    let _ = handler.track_event("app_exited", None);
-                    handler.flush_events_blocking();
+        match event {
+            // Hide window on close instead of quitting the app
+            tauri::RunEvent::WindowEvent {
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } => {
+                api.prevent_close();
+                if let Some(window) = handler.get_webview_window("main") {
+                    let _ = window.hide();
                 }
-                tauri::RunEvent::Ready { .. } => {
-                    let _ = handler.track_event("app_started", None);
-                }
-                _ => {}
             }
+            tauri::RunEvent::Exit { .. } if !aptabase_key.is_empty() => {
+                let _ = handler.track_event("app_exited", None);
+                handler.flush_events_blocking();
+            }
+            tauri::RunEvent::Ready { .. } if !aptabase_key.is_empty() => {
+                let _ = handler.track_event("app_started", None);
+            }
+            _ => {}
         }
     });
 }
